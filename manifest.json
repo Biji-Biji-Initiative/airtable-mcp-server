@@ -32,12 +32,36 @@
   },
   "tools": [
     {
+      "name": "search",
+      "description": "Search baseline tool required by ChatGPT connector."
+    },
+    {
+      "name": "fetch",
+      "description": "Fetch baseline tool required by ChatGPT connector."
+    },
+    {
       "name": "list_records",
       "description": "List records from a table"
     },
     {
       "name": "search_records",
       "description": "Search for records containing specific text"
+    },
+    {
+      "name": "list_views",
+      "description": "List all views for a given table"
+    },
+    {
+      "name": "get_view_metadata",
+      "description": "Get detailed configuration for a specific view"
+    },
+    {
+      "name": "create_view",
+      "description": "Create a new view (grid or kanban) with optional filters, sorts, grouping, and field visibility"
+    },
+    {
+      "name": "delete_view",
+      "description": "Delete an existing view by name or ID"
     },
     {
       "name": "list_bases",

@@ -44,7 +44,7 @@ describe('Main Application', () => {
 	test('creates services and connects server with valid API key from command line', async () => {
 		// Set argv to simulate valid API key argument
 		process.argv = ['node', 'index.js', 'test-api-key'];
-		process.env = {};
+		process.env = {SKIP_PREFLIGHT: '1'};
 
 		// Mock the connect method
 		const mockConnect = vi.fn();
@@ -63,7 +63,7 @@ describe('Main Application', () => {
 	test('creates services and connects server with valid API key from environment', async () => {
 		// Set argv to simulate valid API key argument
 		process.argv = ['node', 'index.js'];
-		process.env = {AIRTABLE_API_KEY: 'test-api-key'};
+		process.env = {AIRTABLE_API_KEY: 'test-api-key', SKIP_PREFLIGHT: '1'};
 
 		// Mock the connect method
 		const mockConnect = vi.fn();

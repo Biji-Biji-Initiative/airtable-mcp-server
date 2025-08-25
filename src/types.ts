@@ -469,6 +469,54 @@ export const DeleteRecordsArgsSchema = z.object({
 	recordIds: z.array(z.string()),
 });
 
+// ------------------------------------------------------------
+// View manipulation tool argument schemas
+// ------------------------------------------------------------
+
+export const ListViewsArgsSchema = z.object({
+	baseId: z.string(),
+	tableId: z.string(),
+});
+
+export const GetViewMetadataArgsSchema = z.object({
+	baseId: z.string(),
+	tableId: z.string(),
+	view: z.string().describe('View ID (viw...) or exact view name'),
+});
+
+export const CreateViewArgsSchema = z.object({
+	baseId: z.string(),
+	tableId: z.string(),
+	name: z.string(),
+	type: z.enum(['grid', 'kanban']).default('grid'),
+	filterByFormula: z.string().optional(),
+	sorts: z
+		.array(
+			z.object({
+				field: z.string().describe('Field name or ID to sort by'),
+				direction: z.enum(['asc', 'desc']).default('asc'),
+			}),
+		)
+		.optional(),
+	groupBy: z
+		.object({
+			field: z
+				.string()
+				.describe('For kanban views: single select or collaborator field (name or ID)'),
+		})
+		.optional(),
+	fields: z
+		.array(z.string())
+		.optional()
+		.describe('Fields to include (order respected). Names or IDs.'),
+});
+
+export const DeleteViewArgsSchema = z.object({
+	baseId: z.string(),
+	tableId: z.string(),
+	view: z.string().describe('View ID (viw...) or exact view name to delete'),
+});
+
 export const CreateTableArgsSchema = z.object({
 	baseId: z.string(),
 	name: z.string().describe('Name for the new table. Must be unique in the base.'),
@@ -531,6 +579,25 @@ export type IAirtableService = {
 	createField(baseId: string, tableId: string, field: Field): Promise<Field & {id: string}>;
 	updateField(baseId: string, tableId: string, fieldId: string, updates: {name?: string | undefined; description?: string | undefined}): Promise<Field & {id: string}>;
 	searchRecords(baseId: string, tableId: string, searchTerm: string, fieldIds?: string[], maxRecords?: number, view?: string): Promise<AirtableRecord[]>;
+
+	// -----------------------------
+	// View manipulation
+	// -----------------------------
+	listViews(baseId: string, tableId: string): Promise<{id: string; name: string; type: string}[]>;
+	getViewMetadata(baseId: string, tableId: string, viewId: string): Promise<any>;
+	createView(
+		baseId: string,
+		tableId: string,
+		input: {
+			name: string;
+			type: 'grid' | 'kanban';
+			filterByFormula?: string;
+			sorts?: {fieldId: string; direction: 'asc' | 'desc'}[];
+			rowGroupingFieldId?: string;
+			fieldOrderIds?: string[];
+		},
+	): Promise<any>;
+	deleteView(baseId: string, tableId: string, viewId: string): Promise<{id: string} | void>;
 };
 
 export type IAirtableMCPServer = {
