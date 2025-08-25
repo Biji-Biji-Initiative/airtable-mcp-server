@@ -154,13 +154,44 @@ describe('AirtableMCPServer', () => {
 				params: {},
 			});
 
-			expect((response.result.tools as Tool[]).length).toBeGreaterThanOrEqual(12);
-			expect((response.result.tools as Tool[])[0]).toMatchObject({
-				name: 'list_records',
+			const tools = response.result.tools as Tool[];
+
+			// At least the core + view + compat tools should be present
+			expect(tools.length).toBeGreaterThanOrEqual(16);
+
+			// ChatGPT-compat tools must be first and in order
+			expect(tools[0]?.name).toBe('search');
+			expect(tools[1]?.name).toBe('fetch');
+
+			// Verify required tool names are all included
+			const names = tools.map((t) => t.name);
+			for (const n of [
+				'list_records',
+				'search_records',
+				'list_bases',
+				'list_tables',
+				'describe_table',
+				'get_record',
+				'create_record',
+				'update_records',
+				'delete_records',
+				'create_table',
+				'update_table',
+				'create_field',
+				'update_field',
+				'list_views',
+				'get_view_metadata',
+				'create_view',
+				'delete_view',
+			]) {
+				expect(names).toContain(n);
+			}
+
+			// Basic shape sanity check on a sample non-compat tool (3rd index)
+			expect(tools[2]).toMatchObject({
+				name: expect.any(String),
 				description: expect.any(String),
-				inputSchema: expect.objectContaining({
-					type: 'object',
-				}),
+				inputSchema: expect.objectContaining({type: 'object'}),
 			});
 		});
 
@@ -189,6 +220,77 @@ describe('AirtableMCPServer', () => {
 				}],
 				isError: false,
 			});
+		});
+
+		test('get_view_metadata disambiguates view name and errors on ambiguity', async () => {
+			// Mock schema where two views share the same name -> should trigger ambiguity error
+			(mockAirtableService.getBaseSchema as any).mockResolvedValueOnce({
+				tables: [{
+					id: 'tbl1',
+					name: 'Test Table',
+					description: 'Test Description',
+					fields: [],
+					views: [
+						{id: 'viw1', name: 'My View', type: 'grid'},
+						{id: 'viw2', name: 'My View', type: 'grid'},
+					],
+					primaryFieldId: 'fld1',
+				}],
+			});
+
+			const response = await sendRequest({
+				jsonrpc: '2.0',
+				id: '1',
+				method: 'tools/call',
+				params: {
+					name: 'get_view_metadata',
+					arguments: {
+						baseId: 'base1',
+						tableId: 'tbl1',
+						view: 'My View',
+					},
+				},
+			});
+
+			expect(response.result).toMatchObject({isError: true});
+			const payload = JSON.parse((response.result as any).content[0].text);
+			expect(payload.code).toBe('ambiguous_view_name');
+		});
+
+		test('create_view validates Kanban group-by field type', async () => {
+			// Schema with a group-by field that is NOT singleSelect or singleCollaborator
+			(mockAirtableService.getBaseSchema as any).mockResolvedValueOnce({
+				tables: [{
+					id: 'tbl1',
+					name: 'Test Table',
+					description: 'Test Description',
+					fields: [
+						{id: 'fld_status', name: 'Status', type: 'singleLineText'},
+					],
+					views: [],
+					primaryFieldId: 'fld1',
+				}],
+			});
+
+			const response = await sendRequest({
+				jsonrpc: '2.0',
+				id: '1',
+				method: 'tools/call',
+				params: {
+					name: 'create_view',
+					arguments: {
+						baseId: 'base1',
+						tableId: 'tbl1',
+						name: 'Kanban A',
+						type: 'kanban',
+						groupBy: {field: 'Status'},
+					},
+				},
+			});
+
+			expect(response.result).toMatchObject({isError: true});
+			const text = (response.result as any).content[0].text as string;
+			expect(text).toMatch(/Kanban group-by must be singleSelect or singleCollaborator/);
 		});
 	});
 

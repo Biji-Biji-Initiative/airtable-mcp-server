@@ -403,5 +403,94 @@ describe('AirtableService', () => {
 				expect(result).toEqual([{id: mockRecordId}]);
 			});
 		});
+
+		describe('caching and retry behavior', () => {
+			test('getBaseSchema caches by TTL and invalidates on create/delete view', async () => {
+				const mockBaseId = 'baseCache';
+				// Short TTL for test
+				process.env.SCHEMA_CACHE_TTL_MS = '50';
+				// Re-instantiate service so it picks up the new TTL
+				service = new AirtableService(
+					mockApiKey,
+					mockBaseUrl,
+					mockFetch as any,
+				);
+
+				const schemaResp1 = {tables: []};
+				const schemaResp2 = {
+					tables: [
+						{
+							id: 't',
+							name: 'T',
+							primaryFieldId: 'f',
+							fields: [],
+							views: [],
+						},
+					],
+				};
+
+				// First fetch
+				mockFetch.mockResolvedValueOnce({ok: true, text: async () => JSON.stringify(schemaResp1)});
+				const r1 = await service.getBaseSchema(mockBaseId);
+				expect(r1).toEqual(schemaResp1);
+				expect(mockFetch).toHaveBeenCalledTimes(1);
+
+				// Second fetch within TTL should hit cache
+				const r2 = await service.getBaseSchema(mockBaseId);
+				expect(r2).toEqual(schemaResp1);
+				expect(mockFetch).toHaveBeenCalledTimes(1);
+
+				// Advance time beyond TTL and expect re-fetch
+				const now = Date.now();
+				const spy = vi.spyOn(Date, 'now').mockReturnValue(now + 60);
+				mockFetch.mockResolvedValueOnce({ok: true, text: async () => JSON.stringify(schemaResp2)});
+				const r3 = await service.getBaseSchema(mockBaseId);
+				expect(r3).toEqual(schemaResp2);
+				expect(mockFetch).toHaveBeenCalledTimes(2);
+				spy.mockRestore();
+
+				// Invalidate on createView then getBaseSchema fetches again
+				mockFetch.mockResolvedValueOnce({
+					ok: true,
+					text: async () => JSON.stringify({id: 'viwX'}),
+				});
+				await service.createView('baseCache', 'tblX', {name: 'V', type: 'grid'});
+				mockFetch.mockResolvedValueOnce({
+					ok: true,
+					text: async () => JSON.stringify(schemaResp1),
+				});
+				await service.getBaseSchema(mockBaseId);
+				expect(mockFetch).toHaveBeenCalledTimes(4);
+
+				// Cleanup
+				delete process.env.SCHEMA_CACHE_TTL_MS;
+			});
+
+			test('retries on 429/5xx with backoff and eventually succeeds', async () => {
+				vi.useFakeTimers();
+				const rateLimited = {
+					ok: false,
+					status: 429,
+					statusText: 'Too Many Requests',
+					text: async () => JSON.stringify({error: {type: 'RATE_LIMITED'}}),
+				};
+
+				const successResp = {
+					ok: true,
+					text: async () => JSON.stringify({bases: []}),
+				};
+				mockFetch
+					.mockResolvedValueOnce(rateLimited as any)
+					.mockResolvedValueOnce(rateLimited as any)
+					.mockResolvedValueOnce(successResp as any);
+
+				const resultPromise = service.listBases();
+				await vi.runAllTimersAsync();
+				const result = await resultPromise;
+				expect(result).toEqual({bases: []});
+				expect(mockFetch).toHaveBeenCalledTimes(3);
+				vi.useRealTimers();
+			});
+		});
 	});
 });

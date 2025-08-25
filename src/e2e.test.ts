@@ -217,7 +217,14 @@ describe.each([
 				params: {},
 			});
 
-			expect(result.tools.map((t) => t.name)).toEqual([
+			const names = result.tools.map((t) => t.name);
+
+			// Ensure search and fetch appear first (ChatGPT compatibility)
+			expect(names[0]).toBe('search');
+			expect(names[1]).toBe('fetch');
+
+			// Ensure existing core tools are still present
+			const expected = [
 				'list_records',
 				'search_records',
 				'list_bases',
@@ -231,9 +238,20 @@ describe.each([
 				'update_table',
 				'create_field',
 				'update_field',
-			]);
-			expect(result.tools[0]).toMatchObject({
-				name: 'list_records',
+			];
+			for (const n of expected) {
+				expect(names).toContain(n);
+			}
+
+			// Ensure new view tools are present
+			const viewTools = ['list_views', 'get_view_metadata', 'create_view', 'delete_view'];
+			for (const n of viewTools) {
+				expect(names).toContain(n);
+			}
+
+			// Validate sample tool schema shape (third tool after search & fetch)
+			expect(result.tools[2]).toMatchObject({
+				name: expect.any(String),
 				description: expect.any(String),
 				inputSchema: expect.objectContaining({
 					type: 'object',

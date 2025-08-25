@@ -119,6 +119,24 @@ Create either a global (`~/.cursor/mcp.json`) or project-specific (`.cursor/mcp.
 
 ### Tools
 
+- **search**
+  - Baseline search required by the ChatGPT connector.  
+  - Finds records that contain a text query.  
+  - Input parameters:  
+    - `query` (string, required): Text to search for.  
+    - `baseId` (string, optional): Restrict search to this base.  
+    - `tableId` (string, optional): Restrict search to this table.  
+    - `view` (string, optional): Restrict search to this view (ID or name).
+
+- **fetch**
+  - Baseline fetch required by the ChatGPT connector.  
+  - Retrieves an individual record / table / view.  
+  - Input parameters:  
+    - `id` (string, required): The identifier of the entity to fetch.  
+    - `type` (string, optional): `'record' | 'table' | 'view'` (default `'record'`).  
+    - `baseId` (string, optional): Required when `type` is `record` or `table`.  
+    - `tableId` (string, optional): Required when `type` is `record` or `view`.
+
 - **list_records**
   - Lists records from a specified Airtable table
   - Input parameters:
@@ -220,6 +238,35 @@ Create either a global (`~/.cursor/mcp.json`) or project-specific (`.cursor/mcp.
     - `name` (string, optional): New name for the field
     - `description` (string, optional): New description for the field
 
+- **list_views**
+  - Lists all views in a table  
+  - Input parameters:  
+    - `baseId` (string, required)  
+    - `tableId` (string, required)
+
+- **get_view_metadata**
+  - Retrieves configuration for an existing view (grid/kanban, filters, sorts, grouping, visible fields).  
+  - Input parameters:  
+    - `baseId` (string, required)  
+    - `tableId` (string, required)  
+    - `view` (string, required): View ID or name
+
+- **create_view**
+  - Creates a new grid or kanban view.  
+  - Input parameters:  
+    - `baseId` (string, required)  
+    - `tableId` (string, required)  
+    - `name` (string, required) – new view name  
+    - `type` (string, required) – `grid` or `kanban`  
+    - `filterByFormula`, `sorts`, `groupBy`, `fields` (all optional – match Airtable API)
+
+- **delete_view**
+  - Deletes a view by ID or name.  
+  - Input parameters:  
+    - `baseId` (string, required)  
+    - `tableId` (string, required)  
+    - `view` (string, required): View ID or name
+
 ### Resources
 
 The server provides schema information for Airtable bases and tables:
@@ -233,6 +280,61 @@ The server provides schema information for Airtable bases and tables:
     - Field definitions (ID, name, type, description, options)
     - View definitions (ID, name, type)
   - Automatically discovered from Airtable's metadata API
+
+## Environment & Logging
+
+- **AIRTABLE_API_KEY** (required) – Personal access token with at least `schema.bases:read` and `data.records:read`.  
+- **LOG_LEVEL** (optional) – `trace`, `debug`, `info` (default), `warn`, `error`, `fatal`.  
+- **SCHEMA_CACHE_TTL_MS** (optional) – Base-schema cache TTL; defaults to `300000` (5 min).  
+- **SKIP_PREFLIGHT** (tests/dev only) – Skip startup permission-scope check.  
+
+All logs are JSON-formatted via [Pino](https://github.com/pinojs/pino) with the API key redacted.
+
+## Retries & Error Handling
+
+Requests that receive **HTTP 429** or **5xx** responses are retried with exponential back-off + jitter
+(max 5 attempts, ~10 s worst-case).  
+Tool errors return structured objects:
+
+```jsonc
+{
+  "code": "unauthorized | forbidden_or_not_found | validation_error | internal_error",
+  "message": "Human-readable message",
+  "hint": "Short hint string (optional)",
+  "remediation": "Suggested fix (optional)"
+}
+```
+
+## Cloud Run Deployment
+
+The repository includes a reusable workflow in  
+`.github/workflows/deploy.yml` that:
+
+1. Builds the TypeScript project  
+2. Builds & pushes a Docker image to Artifact Registry  
+3. Deploys the image to Cloud Run
+
+Configure these **repository secrets** before running the workflow:
+
+| Secret | Description |
+| ------ | ----------- |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full resource name of your workload identity provider |
+| `GCP_SERVICE_ACCOUNT` | Email of the deploy-service account |
+| `GCP_PROJECT_ID` | GCP project ID |
+| `GCP_REGION` | Cloud Run region (`us-central1`, …) |
+| `SERVICE_NAME` | Cloud Run service name |
+| `ARTIFACT_REPOSITORY` | Artifact Registry repo (e.g. `us-central1-docker.pkg.dev/<project>/<repo>/airtable-mcp-server`) |
+
+Do **not** store `AIRTABLE_API_KEY` in GitHub; instead set it as a secret
+environment variable on the Cloud Run service.
+
+### Smoke test
+
+Run a quick connectivity check with your token:
+
+```bash
+AIRTABLE_API_KEY=pat123 node scripts/smoke.mjs
+```
 
 ## Contributing
 

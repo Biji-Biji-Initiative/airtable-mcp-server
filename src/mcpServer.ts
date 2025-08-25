@@ -25,9 +25,14 @@ import {
 	CreateFieldArgsSchema,
 	UpdateFieldArgsSchema,
 	SearchRecordsArgsSchema,
+	ListViewsArgsSchema,
+	GetViewMetadataArgsSchema,
+	CreateViewArgsSchema,
+	DeleteViewArgsSchema,
 	type IAirtableService,
 	type IAirtableMCPServer,
 } from './types.js';
+import {logger} from './logger.js';
 
 const getInputSchema = (schema: z.ZodType<object>): ListToolsResult['tools'][0]['inputSchema'] => {
 	const jsonSchema = zodToJsonSchema(schema);
@@ -69,10 +74,13 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 	}
 
 	async connect(transport: Transport): Promise<void> {
+		logger.info('Connecting MCP server to transport');
 		await this.server.connect(transport);
+		logger.info('MCP server connected successfully');
 	}
 
 	async close(): Promise<void> {
+		logger.info('Closing MCP server connection');
 		await this.server.close();
 	}
 
@@ -81,9 +89,31 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 		this.server.setRequestHandler(ReadResourceRequestSchema, this.handleReadResource.bind(this));
 		this.server.setRequestHandler(ListToolsRequestSchema, this.handleListTools.bind(this));
 		this.server.setRequestHandler(CallToolRequestSchema, this.handleCallTool.bind(this));
+		logger.debug('MCP server handlers initialized');
+	}
+
+	private resolveAndValidateGroupByField(table: any, args: any): string | undefined {
+		if (!args.groupBy?.field) {
+			return undefined;
+		}
+
+		const lookup = (pred: (f: any) => boolean) => table.fields.find(pred);
+		const field = args.groupBy.field.startsWith('fld')
+			? lookup((f: any) => f.id === args.groupBy.field)
+			: lookup((f: any) => f.name === args.groupBy.field);
+		if (!field) {
+			throw new Error(`Field ${args.groupBy.field} not found in table ${args.tableId}`);
+		}
+
+		if (args.type === 'kanban' && field.type !== 'singleSelect' && field.type !== 'singleCollaborator') {
+			throw new Error('Kanban group-by must be singleSelect or singleCollaborator');
+		}
+
+		return field.id;
 	}
 
 	private async handleListResources(): Promise<ListResourcesResult> {
+		logger.debug('Handling list_resources request');
 		const {bases} = await this.airtableService.listBases();
 		const resources = await Promise.all(bases.map(async (base) => {
 			const schema = await this.airtableService.getBaseSchema(base.id);
@@ -101,6 +131,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 	private async handleReadResource(request: z.infer<typeof ReadResourceRequestSchema>): Promise<ReadResourceResult> {
 		const {uri} = request.params;
+		logger.debug({uri}, 'Handling read_resource request');
 		const match = /^airtable:\/\/([^/]+)\/([^/]+)\/schema$/.exec(uri);
 
 		if (!match?.[1] || !match[2]) {
@@ -135,8 +166,37 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 	}
 
 	private async handleListTools(): Promise<ListToolsResult> {
+		logger.debug('Handling list_tools request');
 		return {
 			tools: [
+				{
+					name: 'search',
+					description: 'Search baseline tool required by ChatGPT connector.',
+					inputSchema: {
+						type: 'object',
+						properties: {
+							query: {type: 'string'},
+							baseId: {type: 'string'},
+							tableId: {type: 'string'},
+							view: {type: 'string'},
+						},
+						required: ['query'],
+					},
+				},
+				{
+					name: 'fetch',
+					description: 'Fetch baseline tool required by ChatGPT connector.',
+					inputSchema: {
+						type: 'object',
+						properties: {
+							id: {type: 'string'},
+							type: {type: 'string', enum: ['record', 'table', 'view'], default: 'record'},
+							baseId: {type: 'string'},
+							tableId: {type: 'string'},
+						},
+						required: ['id'],
+					},
+				},
 				{
 					name: 'list_records',
 					description: 'List records from a table',
@@ -206,15 +266,99 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 					description: 'Update a field\'s name or description',
 					inputSchema: getInputSchema(UpdateFieldArgsSchema),
 				},
+				{
+					name: 'list_views',
+					description: 'List all views for a given table',
+					inputSchema: getInputSchema(ListViewsArgsSchema),
+				},
+				{
+					name: 'get_view_metadata',
+					description: 'Get detailed configuration for a specific view',
+					inputSchema: getInputSchema(GetViewMetadataArgsSchema),
+				},
+				{
+					name: 'create_view',
+					description: 'Create a new view (grid or kanban) with optional filters, sorts, grouping, and field visibility',
+					inputSchema: getInputSchema(CreateViewArgsSchema),
+				},
+				{
+					name: 'delete_view',
+					description: 'Delete an existing view by name or ID',
+					inputSchema: getInputSchema(DeleteViewArgsSchema),
+				},
 			],
 		};
 	}
 
 	private async handleCallTool(request: z.infer<typeof CallToolRequestSchema>): Promise<CallToolResult> {
+		logger.info({tool: request.params.name}, 'Handling tool call');
 		try {
 			switch (request.params.name) {
+				case 'search': {
+					const {query, baseId, tableId, view} = request.params.arguments as {
+						query: string;
+						baseId?: string;
+						tableId?: string;
+						view?: string;
+					};
+
+					if (baseId && tableId) {
+						logger.debug({baseId, tableId, query}, 'Executing search_records');
+						const records = await this.airtableService.searchRecords(
+							baseId,
+							tableId,
+							query,
+							undefined,
+							undefined,
+							view,
+						);
+						return formatToolResponse(records);
+					}
+
+					return formatToolResponse({note: 'search placeholder', query});
+				}
+
+				case 'fetch': {
+					const {id, type = 'record', baseId, tableId} = request.params.arguments as {
+						id: string;
+						type?: 'record' | 'table' | 'view';
+						baseId?: string;
+						tableId?: string;
+					};
+
+					logger.debug(
+						{
+							id,
+							type,
+							baseId,
+							tableId,
+						},
+						'Executing fetch',
+					);
+					if (type === 'record' && baseId && tableId) {
+						const record = await this.airtableService.getRecord(baseId, tableId, id);
+						return formatToolResponse(record);
+					}
+
+					if (type === 'table' && baseId) {
+						const schema = await this.airtableService.getBaseSchema(baseId);
+						const table = schema.tables.find((t) => t.id === id);
+						if (table) {
+							return formatToolResponse(table);
+						}
+					}
+
+					if (type === 'view' && baseId && tableId) {
+						const viewMetadata = await this.airtableService.getViewMetadata(baseId, tableId, id);
+						return formatToolResponse(viewMetadata);
+					}
+
+					return formatToolResponse({note: 'fetch placeholder', id, type});
+				}
+
 				case 'list_records': {
 					const args = ListRecordsArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId}, 'Executing list_records');
 					const records = await this.airtableService.listRecords(
 						args.baseId,
 						args.tableId,
@@ -230,6 +374,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 				case 'search_records': {
 					const args = SearchRecordsArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId, term: args.searchTerm}, 'Executing search_records');
 					const records = await this.airtableService.searchRecords(
 						args.baseId,
 						args.tableId,
@@ -242,6 +387,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 				}
 
 				case 'list_bases': {
+					logger.debug('Executing list_bases');
 					const {bases} = await this.airtableService.listBases();
 					return formatToolResponse(bases.map((base) => ({
 						id: base.id,
@@ -252,6 +398,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 				case 'list_tables': {
 					const args = ListTablesArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId}, 'Executing list_tables');
 					const schema = await this.airtableService.getBaseSchema(args.baseId);
 					return formatToolResponse(schema.tables.map((table) => {
 						switch (args.detailLevel) {
@@ -289,6 +436,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 				case 'describe_table': {
 					const args = DescribeTableArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId}, 'Executing describe_table');
 					const schema = await this.airtableService.getBaseSchema(args.baseId);
 					const table = schema.tables.find((t) => t.id === args.tableId);
 
@@ -330,6 +478,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 				case 'get_record': {
 					const args = GetRecordArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId, recordId: args.recordId}, 'Executing get_record');
 					const record = await this.airtableService.getRecord(args.baseId, args.tableId, args.recordId);
 					return formatToolResponse({
 						id: record.id,
@@ -339,6 +488,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 				case 'create_record': {
 					const args = CreateRecordArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId}, 'Executing create_record');
 					const record = await this.airtableService.createRecord(args.baseId, args.tableId, args.fields);
 					return formatToolResponse({
 						id: record.id,
@@ -348,6 +498,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 				case 'update_records': {
 					const args = UpdateRecordsArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId, count: args.records.length}, 'Executing update_records');
 					const records = await this.airtableService.updateRecords(args.baseId, args.tableId, args.records);
 					return formatToolResponse(records.map((record) => ({
 						id: record.id,
@@ -357,6 +508,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 				case 'delete_records': {
 					const args = DeleteRecordsArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId, count: args.recordIds.length}, 'Executing delete_records');
 					const records = await this.airtableService.deleteRecords(args.baseId, args.tableId, args.recordIds);
 					return formatToolResponse(records.map((record) => ({
 						id: record.id,
@@ -365,6 +517,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 				case 'create_table': {
 					const args = CreateTableArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableName: args.name}, 'Executing create_table');
 					const table = await this.airtableService.createTable(
 						args.baseId,
 						args.name,
@@ -376,6 +529,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 				case 'update_table': {
 					const args = UpdateTableArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId}, 'Executing update_table');
 					const table = await this.airtableService.updateTable(
 						args.baseId,
 						args.tableId,
@@ -386,6 +540,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 				case 'create_field': {
 					const args = CreateFieldArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId, fieldType: args.nested.field.type}, 'Executing create_field');
 					const field = await this.airtableService.createField(
 						args.baseId,
 						args.tableId,
@@ -396,6 +551,7 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 
 				case 'update_field': {
 					const args = UpdateFieldArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId, fieldId: args.fieldId}, 'Executing update_field');
 					const field = await this.airtableService.updateField(
 						args.baseId,
 						args.tableId,
@@ -408,11 +564,227 @@ export class AirtableMCPServer implements IAirtableMCPServer {
 					return formatToolResponse(field);
 				}
 
+				case 'list_views': {
+					const args = ListViewsArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId}, 'Executing list_views');
+					const views = await this.airtableService.listViews(args.baseId, args.tableId);
+					return formatToolResponse(views);
+				}
+
+				case 'get_view_metadata': {
+					const args = GetViewMetadataArgsSchema.parse(request.params.arguments);
+					logger.debug(
+						{
+							baseId: args.baseId,
+							tableId: args.tableId,
+							view: args.view,
+						},
+						'Executing get_view_metadata',
+					);
+
+					// Resolve view ID if a name was provided
+					let viewId = args.view;
+					if (!viewId.startsWith('viw')) {
+						const schema = await this.airtableService.getBaseSchema(args.baseId);
+						const table = schema.tables.find((t) => t.id === args.tableId);
+						if (!table) {
+							return formatToolResponse(`Table ${args.tableId} not found in base ${args.baseId}`, true);
+						}
+
+						const matches = table.views.filter((v) => v.name === args.view);
+						logger.debug({viewName: args.view, matchCount: matches.length}, 'View name resolution');
+
+						if (matches.length === 0) {
+							return formatToolResponse(`View ${args.view} not found in table ${args.tableId}`, true);
+						}
+
+						if (matches.length > 1) {
+							logger.warn(
+								{
+									viewName: args.view,
+									tableId: args.tableId,
+								},
+								'Ambiguous view name detected',
+							);
+							return formatToolResponse({
+								code: 'ambiguous_view_name',
+								message: `Multiple views named ${args.view} in table ${args.tableId}`,
+								remediation: 'Use the view ID (viw...) instead of name.',
+							}, true);
+						}
+
+						viewId = matches[0]!.id;
+						logger.debug(
+							{
+								viewName: args.view,
+								viewId,
+							},
+							'View name resolved to ID',
+						);
+					}
+
+					const metadata = await this.airtableService.getViewMetadata(args.baseId, args.tableId, viewId);
+					return formatToolResponse(metadata);
+				}
+
+				case 'create_view': {
+					const args = CreateViewArgsSchema.parse(request.params.arguments);
+					logger.debug(
+						{
+							baseId: args.baseId,
+							tableId: args.tableId,
+							viewName: args.name,
+							viewType: args.type,
+						},
+						'Executing create_view',
+					);
+
+					// Map field names to IDs if needed
+					const schema = await this.airtableService.getBaseSchema(args.baseId);
+					const table = schema.tables.find((t) => t.id === args.tableId);
+					if (!table) {
+						return formatToolResponse(`Table ${args.tableId} not found in base ${args.baseId}`, true);
+					}
+
+					// Map sorts field names to IDs
+					const sorts = args.sorts?.map((sort) => {
+						if (sort.field.startsWith('fld')) {
+							return {fieldId: sort.field, direction: sort.direction};
+						}
+
+						const field = table.fields.find((f) => f.name === sort.field);
+						if (!field) {
+							throw new Error(`Field ${sort.field} not found in table ${args.tableId}`);
+						}
+
+						return {fieldId: field.id, direction: sort.direction};
+					});
+
+					// Use the helper method to resolve and validate groupBy field
+					const rowGroupingFieldId = this.resolveAndValidateGroupByField(table, args);
+
+					// Map fields array to field IDs
+					const fieldOrderIds = args.fields?.map((fieldName) => {
+						if (fieldName.startsWith('fld')) {
+							return fieldName;
+						}
+
+						const field = table.fields.find((f) => f.name === fieldName);
+						if (!field) {
+							throw new Error(`Field ${fieldName} not found in table ${args.tableId}`);
+						}
+
+						return field.id;
+					});
+
+					// Construct input, adding optional properties only when defined
+					const createInput: {
+						name: string;
+						type: 'grid' | 'kanban';
+						filterByFormula?: string;
+						sorts?: {fieldId: string; direction: 'asc' | 'desc'}[];
+						rowGroupingFieldId?: string;
+						fieldOrderIds?: string[];
+					} = {
+						name: args.name,
+						type: args.type,
+					};
+
+					if (args.filterByFormula) {
+						createInput.filterByFormula = args.filterByFormula;
+					}
+
+					if (sorts?.length) {
+						createInput.sorts = sorts as {fieldId: string; direction: 'asc' | 'desc'}[];
+					}
+
+					if (rowGroupingFieldId) {
+						createInput.rowGroupingFieldId = rowGroupingFieldId;
+					}
+
+					if (fieldOrderIds?.length) {
+						createInput.fieldOrderIds = fieldOrderIds as string[];
+					}
+
+					const view = await this.airtableService.createView(args.baseId, args.tableId, createInput);
+					logger.info({baseId: args.baseId, tableId: args.tableId, viewId: view.id}, 'View created successfully');
+					return formatToolResponse(view);
+				}
+
+				case 'delete_view': {
+					const args = DeleteViewArgsSchema.parse(request.params.arguments);
+					logger.debug({baseId: args.baseId, tableId: args.tableId, view: args.view}, 'Executing delete_view');
+
+					// Resolve view ID if a name was provided
+					let viewId = args.view;
+					if (!viewId.startsWith('viw')) {
+						const schema = await this.airtableService.getBaseSchema(args.baseId);
+						const table = schema.tables.find((t) => t.id === args.tableId);
+						if (!table) {
+							return formatToolResponse(`Table ${args.tableId} not found in base ${args.baseId}`, true);
+						}
+
+						const matches = table.views.filter((v) => v.name === args.view);
+						logger.debug({viewName: args.view, matchCount: matches.length}, 'View name resolution for deletion');
+
+						if (matches.length === 0) {
+							return formatToolResponse(`View ${args.view} not found in table ${args.tableId}`, true);
+						}
+
+						if (matches.length > 1) {
+							logger.warn({viewName: args.view, tableId: args.tableId}, 'Ambiguous view name detected for deletion');
+							return formatToolResponse({
+								code: 'ambiguous_view_name',
+								message: `Multiple views named ${args.view} in table ${args.tableId}`,
+								remediation: 'Use the view ID (viw...) instead of name.',
+							}, true);
+						}
+
+						viewId = matches[0]!.id;
+						logger.debug({viewName: args.view, viewId}, 'View name resolved to ID for deletion');
+					}
+
+					const result = await this.airtableService.deleteView(args.baseId, args.tableId, viewId);
+					logger.info({baseId: args.baseId, tableId: args.tableId, viewId}, 'View deleted successfully');
+					return formatToolResponse(result || {deleted: true, id: viewId});
+				}
+
 				default: {
+					logger.warn({tool: request.params.name}, 'Unknown tool requested');
 					throw new Error(`Unknown tool: ${request.params.name}`);
 				}
 			}
 		} catch (error) {
+			// Enhanced error handling with structured error objects
+			logger.error({err: error, tool: request.params.name}, 'Error in tool execution');
+
+			if (error instanceof Error) {
+				// Check for structured error properties
+				const {status} = (error as any);
+				const {airtableErrorType} = (error as any);
+
+				// Map error codes based on status or error type
+				let code = 'internal_error';
+				if (status === 401 || airtableErrorType === 'AUTHENTICATION_REQUIRED') {
+					code = 'unauthorized';
+				} else if (status === 403 || airtableErrorType === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND') {
+					code = 'forbidden_or_not_found';
+				} else if (status === 422) {
+					code = 'validation_error';
+				}
+
+				// Return structured error if we have metadata
+				if (status || airtableErrorType || (error as any).hint || (error as any).remediation) {
+					return formatToolResponse({
+						code,
+						message: error.message,
+						hint: (error as any).hint,
+						remediation: (error as any).remediation,
+					}, true);
+				}
+			}
+
+			// Fallback to previous string format
 			return formatToolResponse(
 				`Error in tool ${request.params.name}: ${error instanceof Error ? error.message : String(error)}`,
 				true,
