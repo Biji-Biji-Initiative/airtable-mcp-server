@@ -1,0 +1,22 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout ${{ github.sha }}
+        uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build and test Docker image
+        run: npm run test -- 'src/e2e.test.ts'
+        env:
+          RUN_DOCKER_TEST: TRUE
