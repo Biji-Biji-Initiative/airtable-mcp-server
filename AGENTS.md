@@ -6,7 +6,7 @@ Fork of [airtable-mcp-server](https://github.com/domdomegg/airtable-mcp-server) 
 ## Upstream Sync
 - Upstream: https://github.com/domdomegg/airtable-mcp-server
 - Sync frequency: As needed
-- Last sync: {UPDATE_THIS}
+- Last sync: 2026-02-27
 
 ## Core Commands
 - Install: `npm install`
